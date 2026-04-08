@@ -33,6 +33,24 @@ pub struct InventorySnapshot {
     pub version: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InventoryHealth {
+    Healthy,
+    LowStock,
+    Depleted,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct InventoryProjection {
+    pub sku: String,
+    pub version: u64,
+    pub available: u32,
+    pub shipped: u32,
+    pub reorder_point: u32,
+    pub health: InventoryHealth,
+    pub fill_rate: f64,
+}
+
 impl InventoryAggregate {
     pub fn apply(&mut self, event: &InventoryEvent) -> Result<(), String> {
         if self.sku.is_empty() {
@@ -81,6 +99,33 @@ impl InventoryAggregate {
             available: self.available(),
             shipped: self.shipped,
             version: self.version,
+        }
+    }
+
+    pub fn to_projection(&self, reorder_point: u32) -> InventoryProjection {
+        let health = if self.available() == 0 {
+            InventoryHealth::Depleted
+        } else if self.available() <= reorder_point {
+            InventoryHealth::LowStock
+        } else {
+            InventoryHealth::Healthy
+        };
+
+        let total_demand = self.shipped.saturating_add(self.reserved);
+        let fill_rate = if total_demand == 0 {
+            1.0
+        } else {
+            self.shipped as f64 / total_demand as f64
+        };
+
+        InventoryProjection {
+            sku: self.sku.clone(),
+            version: self.version,
+            available: self.available(),
+            shipped: self.shipped,
+            reorder_point,
+            health,
+            fill_rate,
         }
     }
 }

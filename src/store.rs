@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use crate::domain::{InventoryAggregate, InventoryEvent, InventoryEventKind, InventorySnapshot};
+use crate::domain::{
+    InventoryAggregate, InventoryEvent, InventoryEventKind, InventoryProjection, InventorySnapshot,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum AppendError {
@@ -12,6 +14,13 @@ pub enum AppendError {
 pub struct InventoryStore {
     streams: HashMap<String, Vec<InventoryEvent>>,
     snapshots: HashMap<String, InventorySnapshot>,
+}
+
+#[derive(Debug, PartialEq)]
+pub struct StoreMetrics {
+    pub tracked_skus: usize,
+    pub total_events: usize,
+    pub low_stock_skus: usize,
 }
 
 impl InventoryStore {
@@ -63,5 +72,52 @@ impl InventoryStore {
 
     pub fn snapshot(&self, sku: &str) -> Option<InventorySnapshot> {
         self.snapshots.get(sku).cloned()
+    }
+
+    pub fn stream(&self, sku: &str) -> Vec<InventoryEvent> {
+        self.streams.get(sku).cloned().unwrap_or_default()
+    }
+
+    pub fn projection(&self, sku: &str, reorder_point: u32) -> Result<InventoryProjection, String> {
+        self.rebuild(sku).map(|aggregate| aggregate.to_projection(reorder_point))
+    }
+
+    pub fn metrics(&self, reorder_point: u32) -> Result<StoreMetrics, String> {
+        let mut low_stock_skus = 0;
+        for sku in self.streams.keys() {
+            let projection = self.projection(sku, reorder_point)?;
+            if projection.available <= reorder_point {
+                low_stock_skus += 1;
+            }
+        }
+
+        Ok(StoreMetrics {
+            tracked_skus: self.streams.len(),
+            total_events: self.streams.values().map(|events| events.len()).sum(),
+            low_stock_skus,
+        })
+    }
+
+    pub fn rebuild_from_snapshot(
+        &self,
+        snapshot: &InventorySnapshot,
+        remaining_events: &[InventoryEvent],
+    ) -> Result<InventoryAggregate, String> {
+        let mut aggregate = InventoryAggregate {
+            sku: snapshot.sku.clone(),
+            on_hand: snapshot.on_hand,
+            reserved: snapshot.reserved,
+            shipped: snapshot.shipped,
+            version: snapshot.version,
+        };
+
+        for event in remaining_events {
+            if event.sequence <= snapshot.version {
+                continue;
+            }
+            aggregate.apply(event)?;
+        }
+
+        Ok(aggregate)
     }
 }
